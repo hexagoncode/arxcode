@@ -5,7 +5,7 @@ from django import forms
 from django.db.models import Q
 
 from typeclasses.rooms import ArxRoom
-from world.dominion.models import RPEvent, Organization, PlayerOrNpc, PlotRoom
+from world.dominion.models import RPEvent, Organization, PlayerOrNpc, PlotRoom, Plot
 
 
 class RPEventCommentForm(forms.Form):
@@ -18,7 +18,7 @@ class RPEventCommentForm(forms.Form):
         msg = self.cleaned_data['journal_text']
         white = not self.cleaned_data['private']
         char.messages.add_event_journal(event, msg, white=white)
-    
+
 
 class RPEventCreateForm(forms.ModelForm):
     """Form for creating a RPEvent. We'll actually try using it in commands for validation"""
@@ -31,19 +31,20 @@ class RPEventCreateForm(forms.ModelForm):
     gms = forms.ModelMultipleChoiceField(queryset=player_queryset, required=False)
     org_invites = forms.ModelMultipleChoiceField(queryset=org_queryset, required=False)
     location = forms.ModelChoiceField(queryset=ArxRoom.objects.all(), widget=forms.HiddenInput(), required=False)
+    plot = forms.ModelChoiceField(queryset=Plot.objects.none(), required=False)
 
     class Meta:
         """Meta options for setting up the form"""
         model = RPEvent
         fields = ['name', 'desc', 'date', 'room_desc', 'location', 'plotroom', 'celebration_tier', 'risk',
-                  'public_event', 'actions']
+                  'public_event']
 
     def __init__(self, *args, **kwargs):
         self.owner = kwargs.pop('owner')
         super(RPEventCreateForm, self).__init__(*args, **kwargs)
         self.fields['desc'].required = True
         self.fields['date'].required = True
-        self.fields['actions'].queryset = self.owner.actions.all()
+        self.fields['plot'].queryset = self.owner.plots_we_can_gm
         if not self.owner.player.is_staff:
             current_orgs = [ob.id for ob in self.owner.current_orgs]
             self.fields['org_invites'].queryset = self.org_queryset.filter(Q(secret=False) | Q(id__in=current_orgs))
@@ -104,8 +105,12 @@ class RPEventCreateForm(forms.ModelForm):
 
     def check_location_or_plotroom(self):
         """Checks to make sure either a location or plotroom is defined."""
-        if not (self.cleaned_data.get('location') or self.cleaned_data.get('plotroom')):
+        location = self.cleaned_data.get('location')
+        plotroom = self.cleaned_data.get('plotroom')
+        if not (location or plotroom):
             self.add_error('plotroom', "You must give either a location or a plot room.")
+        elif all((location, plotroom)):
+            self.add_error('plotroom', "Please only specify location or plot room, not both.")
 
     def save(self, commit=True):
         """Saves the instance and adds the form's owner as the owner of the petition"""
@@ -113,7 +118,9 @@ class RPEventCreateForm(forms.ModelForm):
         event.add_host(self.owner, main_host=True)
         hosts = self.cleaned_data.get('hosts', [])
         for host in hosts:
-            event.add_host(host)
+            # prevent owner from being downgraded to normal host if they were added
+            if host != self.owner:
+                event.add_host(host)
         gms = self.cleaned_data.get('gms', [])
         for gm in gms:
             event.add_gm(gm)
@@ -123,6 +130,11 @@ class RPEventCreateForm(forms.ModelForm):
                 event.add_guest(pc_invite)
         for org in self.cleaned_data.get('org_invites', []):
             event.invite_org(org)
+        plot = self.cleaned_data.get('plot', None)
+        if plot:
+            # we create a blank PlotUpdate so that this is tagged to the Plot, but nothing has happened yet
+            event.beat = plot.updates.create()
+            event.save()
         self.pay_costs()
         self.post_event(event)
         return event
@@ -144,16 +156,24 @@ class RPEventCreateForm(forms.ModelForm):
     def display(self):
         """Returns a game-friend display string"""
         msg = "{wName:{n %s\n" % self.data.get('name')
+        plot = self.data.get('plot')
+        if plot:
+            plot = Plot.objects.get(id=plot)
+            msg += "{wPlot:{n %s\n" % plot
         msg += "{wMain Host:{n %s\n" % self.owner
         hosts = PlayerOrNpc.objects.filter(id__in=self.data.get('hosts', []))
         if hosts:
             msg += "{wOther Hosts:{n %s\n" % ", ".join(str(ob) for ob in hosts)
-        msg += "{wPublic:{n %s\n" % "Public" if self.data.get('public_event', True) else "Private"
+        msg += "{wPublic:{n %s\n" % ("Public" if self.data.get('public_event', True) else "Private")
         msg += "{wDescription:{n %s\n" % self.data.get('desc')
         msg += "{wDate:{n %s\n" % self.data.get('date')
         location = self.data.get('location')
         if location:
-            location = ArxRoom.objects.get(id=location)
+            try:
+                location = ArxRoom.objects.get(id=location)
+            except ArxRoom.DoesNotExist:
+                location = None
+                self.data['location'] = None
         msg += "{wLocation:{n %s\n" % location
         plotroom = self.data.get('plotroom')
         if plotroom:

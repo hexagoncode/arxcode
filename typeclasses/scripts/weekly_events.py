@@ -29,7 +29,7 @@ PRESTIGE_BOARD_NAME = 'Prestige Changes'
 TRAINING_CAP_PER_WEEK = 10
 
 PLAYER_ATTRS = ("votes", 'claimed_scenelist', 'random_scenelist', 'validated_list', 'praises', 'condemns',
-                'requested_validation', 'donated_ap')
+                'requested_validation', 'donated_ap', 'masked_validated_list')
 CHARACTER_ATTRS = ("currently_training", "trainer", 'scene_requests', "num_trained", "num_journals",
                    "num_rel_updates", "num_comments", "num_flashbacks", "support_cooldown", "support_points_spent")
 
@@ -62,11 +62,11 @@ class BulkInformCreator(object):
         self.informs.append(inform)
         return inform
 
-    def create_and_send_informs(self):
+    def create_and_send_informs(self, sender="the Weekly Update script"):
         """Creates all our informs and notifies players/orgs about them"""
         Inform.objects.bulk_create(self.informs)
         for receiver in self.receivers_to_notify:
-            receiver.msg("{yYou have new informs from the Weekly Update script.{n")
+            receiver.msg("{yYou have new informs from %s.{n" % sender)
 
 
 class WeeklyEvents(RunDateMixin, Script):
@@ -87,6 +87,11 @@ class WeeklyEvents(RunDateMixin, Script):
         self.persistent = True
         self.start_delay = True
         self.attributes.add("run_date", datetime.now() + timedelta(days=7))
+
+    def at_start(self, **kwargs):
+        super(WeeklyEvents, self).at_start(**kwargs)
+        from world.magic.advancement import init_magic_advancement
+        init_magic_advancement()
 
     @property
     def inform_creator(self):
@@ -233,7 +238,7 @@ class WeeklyEvents(RunDateMixin, Script):
             # taking damage
             # conditions/social imperative
             # aspirations/progress toward goals
-            char = player.db.char_ob
+            char = player.char_ob
             # for lazy refresh_from_db calls for queries right after the script runs, but unnecessary after a @reload
             char.ndb.stale_ap = True
             # wipe cached attributes

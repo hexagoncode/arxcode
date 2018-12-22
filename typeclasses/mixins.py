@@ -4,7 +4,8 @@ from evennia.utils.utils import lazy_property
 from evennia.utils.ansi import parse_ansi
 
 from world.conditions.triggerhandler import TriggerHandler
-
+from world.templates.models import Template
+from world.templates.mixins import TemplateMixins
 
 class DescMixins(object):
     """
@@ -49,6 +50,7 @@ class DescMixins(object):
         if self.db.general_desc:
             # general desc is our fallback
             self.db.general_desc = val
+        self.ndb.cached_template_desc = None
     desc = property(_desc_get, _desc_set)
 
     def __temp_desc_get(self):
@@ -66,6 +68,7 @@ class DescMixins(object):
             self.db.raw_desc = self.db.desc
         if not self.db.general_desc:
             self.db.desc = self.db.desc
+        self.ndb.cached_template_desc = None
         self.db.desc = val
 
     def __temp_desc_del(self):
@@ -78,6 +81,7 @@ class DescMixins(object):
         if not self.db.general_desc:
             self.db.general_desc = self.db.desc
         self.db.desc = ""
+        self.ndb.cached_template_desc = None
     temp_desc = property(__temp_desc_get, __temp_desc_set, __temp_desc_del)
 
     def __perm_desc_get(self):
@@ -93,6 +97,7 @@ class DescMixins(object):
         """
         self.db.general_desc = val
         self.db.raw_desc = val
+        self.ndb.cached_template_desc = None
     perm_desc = property(__perm_desc_get, __perm_desc_set)
 
     def __get_volume(self):
@@ -215,6 +220,7 @@ class NameMixins(object):
         val = sub_old_ansi(val)
         self.db.colored_name = val
         self.key = parse_ansi(val, strip_ansi=True)
+        self.ndb.cached_template_desc = None
         self.save()
     name = property(__name_get, __name_set)
 
@@ -333,7 +339,7 @@ class BaseObjectMixins(object):
         return self.location.get_room()
 
 
-class AppearanceMixins(BaseObjectMixins):
+class AppearanceMixins(BaseObjectMixins, TemplateMixins):
     def return_contents(self, pobject, detailed=True, show_ids=False,
                         strip_ansi=False, show_places=True, sep=", "):
         """
@@ -377,16 +383,17 @@ class AppearanceMixins(BaseObjectMixins):
             if con.destination:
                 exits.append(key)
             # Only display worn items in inventory to other characters
-            elif con.db.currently_worn:
-                worn.append(con)
-            elif con.db.wielded_by == self:
+            elif hasattr(con, 'wear') and con.is_worn:
+                if con.decorative:
+                    worn.append(con)
+                else:
+                    sheathed.append(key)
+            elif hasattr(con, 'wield') and con.is_wielded:
                 if not con.db.stealth:
                     wielded.append(key)
                 elif hasattr(pobject, 'sensing_check') and pobject.sensing_check(con, diff=con.db.sense_difficulty) > 0:
-                    key += "{w(hidden){n"
+                    key += "{w (hidden){n"
                     wielded.append(key)
-            elif con.db.sheathed_by == self:
-                sheathed.append(key)
             elif con.has_player:
                 # we might have either a title or a fake name
                 lname = con.name
@@ -508,6 +515,15 @@ class AppearanceMixins(BaseObjectMixins):
                 string += "\n%s{n" % desc
         else:  # for crafted objects, respect formatting
             string += "\n%s{n" % desc
+
+            if self.ndb.cached_template_desc:
+                string = self.ndb.cached_template_desc
+            else:
+                templates = Template.objects.in_list(self.find_template_ids(string))
+                if templates.exists():
+                    string = self.replace_template_values(string, templates)
+                self.ndb.cached_template_desc = string
+
         if contents and show_contents:
             string += contents
         return string
@@ -621,6 +637,74 @@ class CraftingMixins(object):
         string += self.return_crafting_desc()
         return string
 
+    def junk(self, caller):
+        """Checks our ability to be junked out."""
+        from server.utils.exceptions import CommandError
+        if self.location != caller:
+            raise CommandError("You can only +junk objects you are holding.")
+        if self.contents:
+            raise CommandError("It contains objects that must first be removed.")
+        if not self.junkable:
+            raise CommandError("This object cannot be destroyed.")
+        self.do_junkout(caller)
+
+    def do_junkout(self, caller):
+        """Attempts to salvage materials from crafted item, then junks it."""
+        from world.dominion.models import (CraftingMaterials, CraftingMaterialType)
+
+        def get_refund_chance():
+            """Gets our chance of material refund based on a skill check"""
+            from world.stats_and_skills import do_dice_check
+            roll = do_dice_check(caller, stat="dexterity", skill="legerdemain", quiet=False)
+            return max(roll, 1)
+
+        def randomize_amount(amt):
+            """Helper function to determine amount kept when junking"""
+            from random import randint
+            num_kept = 0
+            for _ in range(amt):
+                if randint(0, 100) <= roll:
+                    num_kept += 1
+            return num_kept
+
+        pmats = caller.player.Dominion.assets.materials
+        mats = self.db.materials or {}
+        adorns = self.db.adorns or {}
+        refunded = []
+        roll = get_refund_chance()
+        for mat in adorns:
+            cmat = CraftingMaterialType.objects.get(id=mat)
+            amount = adorns[mat]
+            amount = randomize_amount(amount)
+            if amount:
+                try:
+                    pmat = pmats.get(type=cmat)
+                except CraftingMaterials.DoesNotExist:
+                    pmat = pmats.create(type=cmat)
+                pmat.amount += amount
+                pmat.save()
+                refunded.append("%s %s" % (amount, cmat.name))
+        for mat in mats:
+            amount = mats[mat]
+            if mat in adorns:
+                amount -= adorns[mat]
+            amount = randomize_amount(amount)
+            if amount <= 0:
+                continue
+            cmat = CraftingMaterialType.objects.get(id=mat)
+            try:
+                pmat = pmats.get(type=cmat)
+            except CraftingMaterials.DoesNotExist:
+                pmat = pmats.create(type=cmat)
+            pmat.amount += amount
+            pmat.save()
+            refunded.append("%s %s" % (amount, cmat.name))
+        destroy_msg = "You destroy %s." % self
+        if refunded:
+            destroy_msg += " Salvaged materials: %s" % ", ".join(refunded)
+        caller.msg(destroy_msg)
+        self.softdelete()
+
     @property
     def recipe(self):
         """
@@ -673,11 +757,17 @@ class CraftingMixins(object):
             adorn_strs = ["%s %s" % (amt, mat.name) for mat, amt in adorns.items()]
             string += "\nAdornments: %s" % ", ".join(adorn_strs)
         # recipe is an integer matching the CraftingRecipe ID
-        recipe = self.recipe
-        if recipe:
-            string += "\nIt is a %s." % recipe.name
-            # quality_level is an integer, we'll get a name from crafter file's dict
+        if hasattr(self, 'type_description') and self.type_description:
+            from server.utils.arx_utils import a_or_an
+            td = self.type_description
+            part = a_or_an(td)
+            string += "\nIt is %s %s." % (part, td)
+        if self.db.quality_level:
             string += self.get_quality_appearance()
+        if self.db.quantity:
+            string += "\nThere are %d units." % self.db.quantity
+        if hasattr(self, 'origin_description') and self.origin_description:
+            string += self.origin_description
         if self.db.translation:
             string += "\nIt contains script in a foreign tongue."
         # signed_by is a crafter's character object
@@ -685,6 +775,19 @@ class CraftingMixins(object):
         if signed:
             string += "\n%s" % (signed.db.crafter_signature or "")
         return string
+
+    @property
+    def type_description(self):
+        if self.recipe:
+            return self.recipe.name
+
+        return None
+
+    @property
+    def origin_description(self):
+        if self.db.found_shardhaven:
+            return "\nIt was found in %s." % self.db.found_shardhaven
+        return None
 
     @property
     def quality_level(self):
@@ -697,7 +800,7 @@ class CraftingMixins(object):
         """
         if self.quality_level < 0:
             return ""
-        from commands.commands.crafting import QUALITY_LEVELS
+        from commands.base_commands.crafting import QUALITY_LEVELS
         qual = min(self.quality_level, 11)
         qual = QUALITY_LEVELS.get(qual, "average")
         return "\nIts level of craftsmanship is %s." % qual
@@ -717,6 +820,18 @@ class CraftingMixins(object):
         amt = adorns.get(material.id, 0)
         adorns[material.id] = amt + quantity
         self.db.adorns = adorns
+
+    @property
+    def is_plot_related(self):
+        if "plot" in self.tags.all() or self.search_tags.all().exists() or self.clues.all().exists():
+            return True
+
+    @property
+    def junkable(self):
+        """A check for this object's plot connections."""
+        if not self.recipe:
+            raise AttributeError
+        return not self.is_plot_related
 
 
 # regex removes the ascii inside an ascii tag
@@ -795,7 +910,10 @@ class MsgMixins(object):
                 self.ndb.pose_history = []
             else:
                 try:
-                    self.ndb.pose_history.append((from_obj, text))
+                    origin = from_obj
+                    if not from_obj and options.get('is_magic', False):
+                        origin = "Magic System"
+                    self.ndb.pose_history.append((origin, text))
                 except AttributeError:
                     pass
         if options.get('box', False):
@@ -803,6 +921,13 @@ class MsgMixins(object):
         if options.get('roll', False):
             if self.attributes.has("dice_string"):
                 text = "{w<" + self.db.dice_string + "> {n" + text
+        if options.get('is_magic', False):
+            if text[0] == "\n":
+                text = text[1:]
+            text = "{w<" + self.magic_word + "> |n" + text
+            if options.get('is_pose'):
+                if self.db.posebreak:
+                    text = "\n" + text
         try:
             if self.char_ob:
                 msg_sep = self.tags.get("newline_on_messages")
@@ -845,6 +970,26 @@ class MsgMixins(object):
     def msg_location_or_contents(self, text=None, **kwargs):
         """A quick way to ensure a room message, no matter what it's called on. Requires rooms have null location."""
         self.get_room().msg_contents(text=text, **kwargs)
+
+    def confirmation(self, attr, val, prompt_msg):
+        """
+        Prompts the player or character to confirm a choice.
+
+            Args:
+                attr: Name of the confirmation check.
+                val: Value of the NAttribute to use.
+                prompt_msg: Confirmation prompt message.
+
+            Returns:
+                True if we already have the NAttribute set, False if we have to set
+                it and prompt them for confirmation.
+        """
+        attr = "confirm_%s" % attr
+        if self.nattributes.get(attr) == val:
+            self.nattributes.remove(attr)
+            return True
+        self.nattributes.add(attr, val)
+        self.msg(prompt_msg)
 
 
 class LockMixins(object):
@@ -920,7 +1065,7 @@ class LockMixins(object):
         :return: str
         """
         currently_open = not self.db.locked
-        show_contents = currently_open and show_contents
+        show_contents = (currently_open or self.tags.get("displayable")) and show_contents
         base = super(LockMixins, self).return_appearance(pobject, detailed=detailed,
                                                          format_desc=format_desc, show_contents=show_contents)
         return base + "\nIt is currently %s." % ("locked" if self.db.locked else "unlocked")

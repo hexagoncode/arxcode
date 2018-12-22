@@ -23,6 +23,7 @@ several more options for customizing the Guest account system.
 """
 from evennia import DefaultAccount
 from typeclasses.mixins import MsgMixins, InformMixin
+from web.character.models import PlayerSiteEntry
 
 
 class Account(InformMixin, MsgMixins, DefaultAccount):
@@ -141,8 +142,15 @@ class Account(InformMixin, MsgMixins, DefaultAccount):
         # try to auto-connect to it by calling the @ic command
         # (this relies on player.db._last_puppet being set)
         self.execute_cmd("@bbsub/quiet story updates")
+
+        address = self.sessions.all()[-1].address
+        if isinstance(address, tuple):
+            address = address[0]
+
+        PlayerSiteEntry.add_site_for_player(self.char_ob, address)
+
         try:
-            from commands.commands.bboards import get_unread_posts
+            from commands.base_commands.bboards import get_unread_posts
             get_unread_posts(self)
         except Exception:
             pass
@@ -479,20 +487,20 @@ class Account(InformMixin, MsgMixins, DefaultAccount):
     def clue_cost(self):
         """Total cost for clues"""
         return int(100.0/float(self.clues_shared_modifier_seed + 1)) + 1
-        
+
     @property
     def participated_actions(self):
         """Actions we participated in"""
-        from world.dominion.models import CrisisAction
+        from world.dominion.models import PlotAction
         from django.db.models import Q
         dompc = self.Dominion
-        return CrisisAction.objects.filter(Q(assistants=dompc) | Q(dompc=dompc)).distinct()
+        return PlotAction.objects.filter(Q(assistants=dompc) | Q(dompc=dompc)).distinct()
 
     @property
     def past_participated_actions(self):
         """Actions we participated in previously"""
-        from world.dominion.models import CrisisAction
-        return self.participated_actions.filter(status=CrisisAction.PUBLISHED).distinct()
+        from world.dominion.models import PlotAction
+        return self.participated_actions.filter(status=PlotAction.PUBLISHED).distinct()
 
     def show_online(self, caller, check_puppet=False):
         """
@@ -511,7 +519,7 @@ class Account(InformMixin, MsgMixins, DefaultAccount):
     @property
     def player_ob(self):
         """Maybe this should return self? Will need to think about that. Inherited from mixins"""
-        return None
+        return self
 
     @property
     def char_ob(self):

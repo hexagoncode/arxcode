@@ -2,8 +2,9 @@
 Views related to the Dominion app
 """
 from django.views.generic import ListView, DetailView, CreateView
-from .models import RPEvent, AssignedTask, Crisis, Land, Domain, Organization
+from .models import RPEvent, AssignedTask, Plot, Land, Domain, Organization
 from .forms import RPEventCommentForm, RPEventCreateForm
+from .view_utils import EventHTMLCalendar
 from django.http import HttpResponseRedirect, HttpResponse
 from django.http import Http404
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -11,11 +12,14 @@ from django.core.urlresolvers import reverse
 from django.shortcuts import get_object_or_404, render
 from django.db.models import Q
 from django.template.loader import render_to_string
+from django.utils.safestring import mark_safe
 from server.utils.view_mixins import LimitPageMixin
 from PIL import Image, ImageDraw, ImageFont
 from graphviz import Graph
 from math import trunc
 import os.path
+import datetime
+import calendar
 
 
 class RPEventListView(LimitPageMixin, ListView):
@@ -108,8 +112,7 @@ class RPEventDetailView(DetailView):
             else:
                 try:
                     ob = self.get_object()
-                    dompc = user.Dominion
-                    if dompc in ob.dompcs.all():
+                    if ob.can_view(user):
                         can_view = True
                 except AttributeError:
                     pass
@@ -138,11 +141,62 @@ class RPEventCreateView(LoginRequiredMixin, CreateView):
         return reverse("dominion:list_events")
 
 
+def event_calendar(request):
+    after_day = request.GET.get('day__gte', None)
+    extra_context = {}
+
+    if not after_day:
+        d = datetime.date.today()
+    else:
+        try:
+            split_after_day = after_day.split('-')
+            d = datetime.date(year=int(split_after_day[0]), month=int(split_after_day[1]), day=1)
+        except:
+            d = datetime.date.today()
+
+    previous_month = datetime.date(year=d.year, month=d.month, day=1)  # find first day of current month
+    previous_month = previous_month - datetime.timedelta(days=1)  # backs up a single day
+    previous_month = datetime.date(year=previous_month.year, month=previous_month.month,
+                                   day=1)  # find first day of previous month
+
+    last_day = calendar.monthrange(d.year, d.month)
+    next_month = datetime.date(year=d.year, month=d.month, day=last_day[1])  # find last day of current month
+    next_month = next_month + datetime.timedelta(days=1)  # forward a single day
+    next_month = datetime.date(year=next_month.year, month=next_month.month,
+                               day=1)  # find first day of next month
+
+    extra_context['previous_month'] = reverse('dominion:calendar') + '?day__gte=' + previous_month.strftime("%Y-%m-%d")
+    extra_context['next_month'] = reverse('dominion:calendar') + '?day__gte=' + next_month.strftime("%Y-%m-%d")
+
+    user = request.user
+    events = None
+    if user.is_staff:
+        try:
+            events = RPEvent.objects.filter(dompcs__isnull=False).distinct().order_by('-date')
+        except AttributeError:
+            pass
+    elif not user.is_authenticated():
+        events = RPEvent.objects.filter(dompcs__isnull=False,
+                                        public_event=True).distinct().order_by('-date')
+    else:
+        events = RPEvent.objects.filter((Q(public_event=True) | Q(dompcs__player_id=user.id) |
+                                         Q(orgs__in=user.Dominion.current_orgs))).distinct().order_by('-date')
+
+    cal = EventHTMLCalendar(events)
+
+    html_calendar = cal.formatmonth(d.year, d.month, withyear=True)
+    html_calendar = html_calendar.replace('<td ', '<td  width="150" height="150"')
+    extra_context['calendar'] = mark_safe(html_calendar)
+    extra_context['page_title'] = "Events Calendar"
+
+    return render(request, 'dominion/calendar.html', extra_context)
+
+
 class CrisisDetailView(DetailView):
     """
     Displays view for a specific crisis
     """
-    model = Crisis
+    model = Plot
     template_name = 'dominion/crisis_view.html'
 
     def get_context_data(self, **kwargs):
@@ -152,7 +206,7 @@ class CrisisDetailView(DetailView):
             raise Http404
         context['page_title'] = str(self.get_object())
         context['viewable_actions'] = self.get_object().get_viewable_actions(self.request.user)
-        context['updates_with_actions'] = [ob.update for ob in context['viewable_actions']]
+        context['updates_with_actions'] = [ob.beat for ob in context['viewable_actions']]
         return context
 
 
@@ -179,7 +233,7 @@ def event_comment(request, pk):
     """
     Makes an in-game comment on an event
     """
-    char = request.user.db.char_ob
+    char = request.user.char_ob
     if not char:
         raise Http404
     event = get_object_or_404(RPEvent, id=pk)
@@ -447,7 +501,7 @@ def map_wrapper(request):
     return render(request, "dominion/map_pregen.html", context)
 
 
-def fealty_chart(request):
+def generate_fealty_chart(request, filename, include_npcs=False):
 
     node_colors = {
         'Ruling Prince': 'lightblue',
@@ -458,8 +512,11 @@ def fealty_chart(request):
         'Ruling Marquis': 'red',
         'Marquis': 'red',
         'Marquis, Count of the March': 'red',
+        'Margrave': 'red',
         'Lord of the March': 'red',
+        'Truespeaker': 'red',
         'Ruling Count': 'yellow',
+        'Count of the March': 'yellow',
         'Count': 'yellow',
         'Ruling Baron': 'green',
         'Baron': 'green',
@@ -475,7 +532,8 @@ def fealty_chart(request):
                 org_name = org_name + "\n(" + org_rank_1.player.player.key.title() + ")"
 
             for vassal in org.assets.estate.vassals.all():
-                if vassal.house and not vassal.house.organization_owner.name.startswith("Vassal of"):
+                is_npc = vassal.house.organization_owner.living_members.all().count() > 0
+                if vassal.house and (not is_npc or include_npcs):
                     node_color = node_colors.get(vassal.house.organization_owner.rank_1_male, None)
                     name = vassal.house.organization_owner.name
 
@@ -493,12 +551,12 @@ def fealty_chart(request):
     if request.user.is_authenticated():
         regen = request.GET.get("regenerate")
 
-    if not os.path.exists("world/dominion/fealty/fealty_graph.png"):
+    if not os.path.exists(filename + ".png"):
         regen = True
 
     if not regen:
         response = HttpResponse(content_type="image/png")
-        fealtyimage = Image.open("world/dominion/fealty/fealty_graph.png")
+        fealtyimage = Image.open(filename + ".png")
         fealtyimage.save(response, "PNG")
         return response
 
@@ -508,13 +566,22 @@ def fealty_chart(request):
         crown = Organization.objects.get(id=145)
         add_vassals(G, crown)
 
-        G.render("world/dominion/fealty/fealty_graph", cleanup=True)
+        G.render(filename, cleanup=True)
 
         response = HttpResponse(content_type="image/png")
-        fealtyimage = Image.open("world/dominion/fealty/fealty_graph.png")
+        fealtyimage = Image.open(filename + ".png")
         fealtyimage.save(response, "PNG")
         return response
 
     except Exception as e:
         print e
         raise Http404
+
+
+def fealty_chart(request):
+    return generate_fealty_chart(request, "world/dominion/fealty/fealty_graph", include_npcs=False)
+
+
+def fealty_chart_full(request):
+    return generate_fealty_chart(request, "world/dominion/fealty/fealty_graph_full", include_npcs=True)
+

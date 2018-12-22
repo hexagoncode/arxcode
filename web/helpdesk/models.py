@@ -265,12 +265,7 @@ class Ticket(SharedMemoryModel):
     the dashboard to prompt users to take ownership of them.
     """
 
-    OPEN_STATUS = 1
-    REOPENED_STATUS = 2
-    RESOLVED_STATUS = 3
-    CLOSED_STATUS = 4
-    DUPLICATE_STATUS = 5
-
+    OPEN_STATUS, REOPENED_STATUS, RESOLVED_STATUS, CLOSED_STATUS, DUPLICATE_STATUS = range(1, 6)
     STATUS_CHOICES = (
         (OPEN_STATUS, _('Open')),
         (REOPENED_STATUS, _('Reopened')),
@@ -278,7 +273,6 @@ class Ticket(SharedMemoryModel):
         (CLOSED_STATUS, _('Closed')),
         (DUPLICATE_STATUS, _('Duplicate')),
     )
-
     PRIORITY_CHOICES = (
         (1, _('1. Critical')),
         (2, _('2. High')),
@@ -287,88 +281,29 @@ class Ticket(SharedMemoryModel):
         (5, _('5. Very Low')),
         (6, _('6. Super Low')),
     )
-
-    title = models.CharField(
-        _('Title'),
-        max_length=200,
-        )
-
-    queue = models.ForeignKey(
-        Queue,
-        verbose_name=_('Queue'),
-        )
-
-    db_date_created = models.DateTimeField(
-        _('Created'),
-        blank=True,
-        help_text=_('Date this ticket was first created'),
-        )
-
-    modified = models.DateTimeField(
-        _('Modified'),
-        blank=True,
-        help_text=_('Date this ticket was most recently changed.'),
-        )
-
-    submitter_email = models.EmailField(
-        _('Submitter E-Mail'),
-        blank=True,
-        null=True,
-        help_text=_('The submitter will receive an email for all public '
-            'follow-ups left for this task.'),
-        )
-
-    assigned_to = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        related_name='assigned_to',
-        blank=True,
-        null=True,
-        verbose_name=_('Assigned to'),
-        )
-    
-    submitting_player = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        related_name='tickets',
-        blank=True,
-        null=True,
-        verbose_name=_('Player who opened this ticket'),
-        )
-
-    submitting_room = models.ForeignKey(
-        'objects.ObjectDB',
-        blank=True,
-        null=True,
-        verbose_name=_('Room where this was submitted'),
-        on_delete=models.SET_NULL,
-        )
-    
-    status = models.IntegerField(
-        _('Status'),
-        choices=STATUS_CHOICES,
-        default=OPEN_STATUS,
-        )
-
-    on_hold = models.BooleanField(
-        _('On Hold'),
-        blank=True,
-        default=False,
-        help_text=_('If a ticket is on hold, it will not automatically be '
-            'escalated.'),
-        )
-
-    description = models.TextField(
-        _('Description'),
-        blank=True,
-        null=True,
-        help_text=_('The content of the customers query.'),
-        )
-
-    resolution = models.TextField(
-        _('Resolution'),
-        blank=True,
-        null=True,
-        help_text=_('The resolution provided to the customer by our staff.'),
-        )
+    title = models.CharField( _('Title'), max_length=200,)
+    queue = models.ForeignKey(Queue, verbose_name=_('Queue'),)
+    db_date_created = models.DateTimeField(_('Created'), blank=True, help_text=_('Date this ticket was first created'),)
+    modified = models.DateTimeField(_('Modified'), blank=True,
+                                    help_text=_('Date this ticket was most recently changed.'))
+    submitter_email = models.EmailField(_('Submitter E-Mail'), blank=True, null=True, help_text=_(
+        'The submitter will receive an email for all public follow-ups left for this task.'))
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='assigned_to', blank=True, null=True,
+                                    verbose_name=_('Assigned to'))
+    submitting_player = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='tickets', blank=True, null=True,
+                                          verbose_name=_('Player who opened this ticket'))
+    submitting_room = models.ForeignKey('objects.ObjectDB', blank=True, null=True,
+                                        verbose_name=_('Room where this was submitted'), on_delete=models.SET_NULL)
+    plot = models.ForeignKey('dominion.Plot', blank=True, null=True, related_name="tickets")
+    beat = models.ForeignKey('dominion.PlotUpdate', blank=True, null=True, related_name="tickets")
+    goal_update = models.ForeignKey('character.GoalUpdate', blank=True, null=True, related_name="tickets")
+    status = models.IntegerField(_('Status'), choices=STATUS_CHOICES, default=OPEN_STATUS)
+    on_hold = models.BooleanField(_('On Hold'), blank=True, default=False, help_text=_(
+        'If a ticket is on hold, it will not automatically be escalated.'))
+    description = models.TextField(_('Description'), blank=True, null=True,
+                                   help_text=_('The content of the customers query.'))
+    resolution = models.TextField(_('Resolution'), blank=True, null=True, help_text=_(
+        'The resolution provided to the customer by our staff.'))
 
     priority = models.IntegerField(
         _('Priority'),
@@ -389,7 +324,7 @@ class Ticket(SharedMemoryModel):
         null=True,
         editable=False,
         help_text=_('The date this ticket was last escalated - updated '
-            'automatically by management/commands/escalate_tickets.py.'),
+                    'automatically by management/commands/escalate_tickets.py.'),
         )
 
     def _get_assigned_to(self):
@@ -525,31 +460,47 @@ class Ticket(SharedMemoryModel):
             A string with ansi/Evennia markup that displays appropriate ticket
             information. Not meant to be used outside of telnet.
         """
-
-        msg = "\n{wQueue:{n %s" % self.queue
-        msg += "\n{wTicket Number:{n %s" % self.id
+        priority = self.priority
+        priority_color = "|w"
+        if priority == 1:
+            priority_color = "|r"
+        elif priority >= 5:
+            priority_color = "|333"
+        msg = "\n|w[Ticket #%s]|n %s" % (self.id, self.title)
+        msg += "\n|wQueue:|n %s - %sPriority %s|n" % (self.queue, priority_color, priority)
         if self.submitting_player:
-            msg += "\n{wPlayer:{n %s" % self.submitting_player.key
-        msg += "\n{wDate submitted:{n %s" % self.db_date_created.strftime("%x %X")
-        msg += "\n{wLast modified:{n %s" % self.modified.strftime("%x %X")
-        msg += "\n{wTitle:{n %s" % self.title
+            msg += "\n|wPlayer: |c%s|n" % self.submitting_player.key
         room = self.submitting_room
         if room:
-            msg += "\n{wLocation:{n %s (#%s)" % (room, room.id)
-        msg += "\n{wPriority:{n %s" % self.priority
+            msg += "\n|wLocation:|n %s |n(#%s)" % (room, room.id)
+        msg += "\n|wSubmitted:|n %s" % self.db_date_created.strftime("%x %X")
+        if self.modified:
+            msg += " - |wLast Update:|n %s" % self.modified.strftime("%x %X")
         msg += self.request_and_response_body()
         return msg
 
     def request_and_response_body(self):
-        msg = "\n{wRequest:{n %s" % self.description
-        if self.assigned_to:
-            msg += "\n{wGM:{n %s" % self.assigned_to.key
+        msg = "\n|wRequest:|n %s" % self.description
+        if self.plot:
+            msg += "\n"
+            if self.plot.usage == self.plot.PITCH:
+                msg += "\n|wPlot Pitch: (#%s)|n\n" % self.plot.id
+                msg += self.plot.display(staff_display=True)
+                msg += "\n"
+            else:
+                msg += "|wPlot:|n %s (#%s)" % (self.plot, self.plot.id)
+                if self.beat:
+                    msg += " |wBeat ID:|n #%s" % self.beat.id
+        if self.goal_update:
+            goal = self.goal_update.goal
+            msg += "\nUpdate for goal: %s (#%s)" % (goal, goal.id)
+            msg += "\nPlayer Summary: %s" % self.goal_update.player_summary
         for followup in self.followup_set.all():
-            msg += "\n{wFollowup by:{n %s" % followup.user
-            msg += "\n{wComment:{n %s" % followup.comment
-        msg += "\n\n{wGM Resolution:{n %s" % self.resolution
+            msg += "\n|wFollowup by |c%s|w:|n %s" % (followup.user, followup.comment)
+        if self.assigned_to:
+            msg += "\n|wAssigned GM:|n %s" % self.assigned_to.key
+        msg += "\n|wGM Resolution:|n %s" % self.resolution
         return msg
-
 
 
 class FollowUpManager(models.Manager):

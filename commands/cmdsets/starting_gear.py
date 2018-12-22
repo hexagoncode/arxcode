@@ -14,13 +14,13 @@ creative process.
 """
 from world.dominion.setup_utils import setup_dom_for_char
 from evennia import CmdSet
-from server.utils.arx_utils import ArxCommand, ArxPlayerCommand
+from commands.base import ArxCommand, ArxPlayerCommand
 from server.utils import arx_utils
 from world.dominion.models import (CraftingMaterialType, PlayerOrNpc,
                                    CraftingRecipe, AssetOwner)
-from commands.commands.crafting import (create_decorative_weapon, create_wearable, create_weapon,
-                                        create_place, create_book, create_container,
-                                        create_wearable_container, create_generic)
+from commands.base_commands.crafting import (create_decorative_weapon, create_wearable, create_weapon,
+                                             create_place, create_book, create_container,
+                                             create_wearable_container, create_generic)
 
 CASH = 6000
 
@@ -301,7 +301,7 @@ class CmdSetupGear(ArxPlayerCommand):
         targ = caller.search(self.lhs)
         if not targ:
             return
-        char = targ.db.char_ob
+        char = targ.char_ob
         if not char:
             caller.msg("No char.")
             return
